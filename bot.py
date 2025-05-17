@@ -95,13 +95,16 @@ class YouTubeDownloaderBot:
         progress_handler = ProgressHandler(chat_id, context.bot)
         
         try:
-            await self.downloader.download_playlist(
+            success = await self.downloader.download_playlist(
                 playlist_url,
                 quality,
                 progress_handler.update_progress,
                 chat_id
             )
-            await context.bot.send_message(chat_id, "All videos downloaded successfully!")
+            if success:
+                await context.bot.send_message(chat_id, "All videos downloaded successfully!")
+            else:
+                await context.bot.send_message(chat_id, "Some videos failed to download. Please try again.")
         except Exception as e:
             logger.error(f"Error downloading playlist: {e}")
             error_msg = str(e)
@@ -109,47 +112,17 @@ class YouTubeDownloaderBot:
             if "Incomplete data received" in error_msg:
                 error_msg = (
                     "Download failed due to incomplete data received from YouTube.\n\n"
-                    "This is usually a temporary issue. Please try again later or try downloading "
-                    "individual videos instead of the full playlist."
+                    "This is usually a temporary issue. Please try again later."
                 )
             elif "Unsupported URL" in error_msg:
                 error_msg = "Invalid YouTube playlist URL. Please check the URL and try again."
-            elif "Private video" in error_msg:
-                error_msg = "The playlist contains private videos that cannot be downloaded."
-            elif "This video is unavailable" in error_msg:
-                error_msg = "The playlist contains unavailable videos."
             else:
                 error_msg = f"Download failed: {error_msg}"
             
             await context.bot.send_message(chat_id, error_msg)
-            
-            # Offer to try individual videos
-            keyboard = [
-                [InlineKeyboardButton("Try downloading individual videos", callback_data=f"try_indiv_{quality}")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await context.bot.send_message(
-                chat_id,
-                "Would you like to try downloading videos one by one?",
-                reply_markup=reply_markup
-            )
         finally:
             if chat_id in self.user_states:
                 del self.user_states[chat_id]
-
-    async def handle_individual_download(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        query = update.callback_query
-        await query.answer()
-        
-        chat_id = query.message.chat_id
-        quality = query.data.replace("try_indiv_", "")
-        
-        await context.bot.send_message(chat_id, f"Starting individual downloads at {quality}p quality...")
-        
-        # Here you would implement the logic to extract individual video URLs
-        # from the playlist and download them one by one using:
-        # await self.downloader.download_video(video_url, quality, progress_handler, chat_id)
-        await context.bot.send_message(chat_id, "Individual video download feature will be implemented here")
 
     def _is_user_allowed(self, update: Update):
         if not self.allowed_user_ids:  # If no restrictions
@@ -163,10 +136,6 @@ class YouTubeDownloaderBot:
         application.add_handler(CommandHandler('start', self.start))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
         application.add_handler(CallbackQueryHandler(self.handle_quality_selection))
-        application.add_handler(CallbackQueryHandler(
-            self.handle_individual_download,
-            pattern="^try_indiv_"
-        ))
 
         # Run the bot
         application.run_polling()
