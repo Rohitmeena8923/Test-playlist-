@@ -28,7 +28,7 @@ class YouTubeDownloaderBot:
         self.token = os.getenv('TELEGRAM_BOT_TOKEN')
         self.allowed_user_ids = [int(id) for id in os.getenv('ALLOWED_USER_IDS', '').split(',') if id]
         self.downloader = YouTubePlaylistDownloader()
-        self.user_states = {}  # To track user's current state
+        self.user_states = {}
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_user_allowed(update):
@@ -36,45 +36,38 @@ class YouTubeDownloaderBot:
             return
 
         await update.message.reply_text(
-            "Welcome to YouTube Playlist Downloader Bot!\n\n"
-            "Send me a YouTube playlist URL to get started."
+            "🎬 YouTube Playlist Downloader Bot\n\n"
+            "Send me a YouTube playlist URL to download videos"
         )
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_user_allowed(update):
             return
 
-        text = update.message.text
+        text = update.message.text.strip()
         chat_id = update.message.chat_id
 
-        if 'youtube.com/playlist?' in text or 'youtu.be/playlist?' in text:
+        if any(p in text for p in ['youtube.com/playlist?', 'youtu.be/playlist?']):
             self.user_states[chat_id] = {'playlist_url': text}
             await self._ask_quality(update, context)
         else:
-            await update.message.reply_text("Please send a valid YouTube playlist URL.")
+            await update.message.reply_text("⚠️ Please send a valid YouTube playlist URL")
 
     async def _ask_quality(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        chat_id = update.message.chat_id
-        keyboard = [
-            [
-                InlineKeyboardButton("144p", callback_data='144'),
-                InlineKeyboardButton("240p", callback_data='240'),
-                InlineKeyboardButton("360p", callback_data='360'),
-            ],
-            [
-                InlineKeyboardButton("480p", callback_data='480'),
-                InlineKeyboardButton("720p", callback_data='720'),
-                InlineKeyboardButton("1080p", callback_data='1080'),
-            ],
-            [
-                InlineKeyboardButton("Best Available", callback_data='best'),
-                InlineKeyboardButton("Audio Only", callback_data='audio'),
-            ]
+        qualities = [
+            ['144p', '240p', '360p'],
+            ['480p', '720p', '1080p'],
+            ['Best Quality', 'Audio Only']
         ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        keyboard = [
+            [InlineKeyboardButton(q, callback_data=q.split()[0].lower()) 
+             for q in row] for row in qualities
+        ]
+        
         await update.message.reply_text(
-            'Please choose the download quality:',
-            reply_markup=reply_markup
+            '📺 Select download quality:',
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
     async def handle_quality_selection(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -84,14 +77,13 @@ class YouTubeDownloaderBot:
         chat_id = query.message.chat_id
         quality = query.data
 
-        if chat_id not in self.user_states or 'playlist_url' not in self.user_states[chat_id]:
-            await query.edit_message_text("Error: No playlist URL found. Please start over.")
+        if chat_id not in self.user_states:
+            await query.edit_message_text("❌ Session expired. Please start over.")
             return
 
         playlist_url = self.user_states[chat_id]['playlist_url']
-        await query.edit_message_text(f"Starting download for playlist at {quality}p quality...")
+        await query.edit_message_text(f"⏳ Starting download at {quality} quality...")
 
-        # Initialize progress handler
         progress_handler = ProgressHandler(chat_id, context.bot)
         
         try:
@@ -101,45 +93,57 @@ class YouTubeDownloaderBot:
                 progress_handler.update_progress,
                 chat_id
             )
+            
             if success:
-                await context.bot.send_message(chat_id, "All videos downloaded successfully!")
+                await context.bot.send_message(chat_id, "✅ All downloads completed!")
             else:
-                await context.bot.send_message(chat_id, "Some videos failed to download. Please try again.")
-        except Exception as e:
-            logger.error(f"Error downloading playlist: {e}")
-            error_msg = str(e)
-            
-            if "Incomplete data received" in error_msg:
-                error_msg = (
-                    "Download failed due to incomplete data received from YouTube.\n\n"
-                    "This is usually a temporary issue. Please try again later."
+                await context.bot.send_message(
+                    chat_id,
+                    "⚠️ Some videos failed to download. Try again later."
                 )
-            elif "Unsupported URL" in error_msg:
-                error_msg = "Invalid YouTube playlist URL. Please check the URL and try again."
-            else:
-                error_msg = f"Download failed: {error_msg}"
-            
+                
+        except Exception as e:
+            error_msg = self._format_error(e)
             await context.bot.send_message(chat_id, error_msg)
+            logger.error(f"Download failed: {error_msg}")
         finally:
-            if chat_id in self.user_states:
-                del self.user_states[chat_id]
+            self.user_states.pop(chat_id, None)
+
+    def _format_error(self, error):
+        error_str = str(error)
+        if "Incomplete data" in error_str:
+            return (
+                "⚠️ Download failed - Network Error\n\n"
+                "Possible solutions:\n"
+                "1. Try again later\n"
+                "2. Use a better network connection\n"
+                "3. Try smaller playlists\n"
+                "4. Contact support if persists"
+            )
+        elif "Unavailable" in error_str:
+            return "❌ Video is unavailable or private"
+        else:
+            return f"⚠️ Error: {error_str[:200]}"
 
     def _is_user_allowed(self, update: Update):
-        if not self.allowed_user_ids:  # If no restrictions
+        if not self.allowed_user_ids:
             return True
         return update.effective_user.id in self.allowed_user_ids
 
     def run(self):
         application = ApplicationBuilder().token(self.token).build()
+        
+        handlers = [
+            CommandHandler('start', self.start),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message),
+            CallbackQueryHandler(self.handle_quality_selection)
+        ]
+        
+        for handler in handlers:
+            application.add_handler(handler)
 
-        # Add handlers
-        application.add_handler(CommandHandler('start', self.start))
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
-        application.add_handler(CallbackQueryHandler(self.handle_quality_selection))
-
-        # Run the bot
+        logger.info("Bot is running...")
         application.run_polling()
 
 if __name__ == '__main__':
-    bot = YouTubeDownloaderBot()
-    bot.run()
+    YouTubeDownloaderBot().run()
