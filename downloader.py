@@ -20,11 +20,12 @@ class YouTubePlaylistDownloader:
         quality: str,
         progress_callback: Optional[Callable],
         chat_id: int
-    ):
+    ) -> bool:
         ydl_opts = self._get_ydl_options(quality, progress_callback)
         
         try:
             with YoutubeDL(ydl_opts) as ydl:
+                # First extract info without downloading
                 info = await self._run_async(ydl.extract_info, playlist_url, download=False)
                 
                 if 'entries' in info:
@@ -32,22 +33,23 @@ class YouTubePlaylistDownloader:
                     playlist_dir = os.path.join(self.download_path, playlist_title)
                     os.makedirs(playlist_dir, exist_ok=True)
                     
+                    # Now download with the proper output template
                     ydl_opts['outtmpl'] = os.path.join(playlist_dir, '%(title)s.%(ext)s')
-                    ydl_opts['retries'] = self.max_retries
-                    
-                    await self._download_with_retries(ydl_opts, playlist_url, chat_id)
+                    await self._download_with_retries(ydl_opts, playlist_url)
+                    return True
+                return False
         except Exception as e:
             logger.error(f"Error downloading playlist: {e}")
             raise
 
-    async def _download_with_retries(self, ydl_opts, url, chat_id):
+    async def _download_with_retries(self, ydl_opts, url):
         for attempt in range(self.max_retries + 1):
             try:
                 with YoutubeDL(ydl_opts) as ydl:
                     await self._run_async(ydl.download, [url])
-                break  # Success - exit retry loop
+                return True
             except DownloadError as e:
-                if "Incomplete data received" in str(e) and attempt < self.max_retries:
+                if attempt < self.max_retries:
                     logger.warning(f"Attempt {attempt + 1} failed. Retrying in {self.retry_delay} seconds...")
                     await asyncio.sleep(self.retry_delay)
                     continue
@@ -56,9 +58,9 @@ class YouTubePlaylistDownloader:
                 logger.error(f"Unexpected error during download: {e}")
                 raise
 
-    async def _run_async(self, func, *args):
+    async def _run_async(self, func, *args, **kwargs):
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, func, *args)
+        return await loop.run_in_executor(None, lambda: func(*args, **kwargs))
 
     def _get_ydl_options(self, quality: str, progress_callback: Optional[Callable]):
         opts = {
@@ -71,10 +73,6 @@ class YouTubePlaylistDownloader:
             'fragment_retries': self.max_retries,
             'skip_unavailable_fragments': True,
             'extract_flat': False,
-            'postprocessors': [{
-                'key': 'FFmpegVideoConvertor',
-                'preferedformat': 'mp4',
-            }],
         }
         
         if quality == 'audio':
@@ -86,6 +84,11 @@ class YouTubePlaylistDownloader:
                     'preferredquality': '192',
                 }],
             })
+        else:
+            opts['postprocessors'] = [{
+                'key': 'FFmpegVideoConvertor',
+                'preferedformat': 'mp4',
+            }]
         
         return opts
 
@@ -96,9 +99,3 @@ class YouTubePlaylistDownloader:
             return 'bestaudio/best'
         else:
             return f'bestvideo[height<={quality}][ext=mp4]+bestaudio[ext=m4a]/best[height<={quality}]/best'
-
-    async def download_video(self, video_url: str, quality: str, progress_callback: Optional[Callable], chat_id: int):
-        """Alternative method for single video download"""
-        ydl_opts = self._get_ydl_options(quality, progress_callback)
-        ydl_opts['outtmpl'] = os.path.join(self.download_path, '%(title)s.%(ext)s')
-        await self._download_with_retries(ydl_opts, video_url, chat_id)
