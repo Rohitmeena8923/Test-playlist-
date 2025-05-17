@@ -1,8 +1,7 @@
 import os
 import asyncio
-from yt_dlp import YoutubeDL, DownloadError
+from yt_dlp import YoutubeDL
 from typing import Callable, Optional
-from utils import sanitize_filename
 import logging
 
 logger = logging.getLogger(__name__)
@@ -12,76 +11,62 @@ class YouTubePlaylistDownloader:
         self.download_path = os.getenv('DOWNLOAD_PATH', './downloads')
         os.makedirs(self.download_path, exist_ok=True)
         self.max_retries = 3
-        self.retry_delay = 5  # seconds
+        self.retry_delay = 10  # Increased delay
 
     async def download_playlist(
         self,
-        playlist_url: str,
+        url: str,
         quality: str,
         progress_callback: Optional[Callable],
         chat_id: int
     ) -> bool:
-        ydl_opts = self._get_ydl_options(quality, progress_callback)
+        opts = self._get_options(quality, progress_callback)
         
         try:
-            with YoutubeDL(ydl_opts) as ydl:
-                # First extract info without downloading
-                info = await self._run_async(ydl.extract_info, playlist_url, download=False)
-                
-                if 'entries' in info:
-                    playlist_title = sanitize_filename(info.get('title', 'playlist'))
-                    playlist_dir = os.path.join(self.download_path, playlist_title)
-                    os.makedirs(playlist_dir, exist_ok=True)
-                    
-                    # Now download with the proper output template
-                    ydl_opts['outtmpl'] = os.path.join(playlist_dir, '%(title)s.%(ext)s')
-                    await self._download_with_retries(ydl_opts, playlist_url)
-                    return True
-                return False
+            return await self._download_with_retries(url, opts)
         except Exception as e:
-            logger.error(f"Error downloading playlist: {e}")
+            logger.error(f"Final download attempt failed: {e}")
             raise
 
-    async def _download_with_retries(self, ydl_opts, url):
-        for attempt in range(self.max_retries + 1):
+    async def _download_with_retries(self, url, opts):
+        for attempt in range(1, self.max_retries + 1):
             try:
-                with YoutubeDL(ydl_opts) as ydl:
-                    await self._run_async(ydl.download, [url])
-                return True
-            except DownloadError as e:
-                if attempt < self.max_retries:
-                    logger.warning(f"Attempt {attempt + 1} failed. Retrying in {self.retry_delay} seconds...")
-                    await asyncio.sleep(self.retry_delay)
-                    continue
-                raise
+                with YoutubeDL(opts) as ydl:
+                    await self._run_in_executor(ydl.download, [url])
+                    return True
+                    
             except Exception as e:
-                logger.error(f"Unexpected error during download: {e}")
-                raise
+                if attempt == self.max_retries:
+                    raise
+                
+                logger.warning(f"Attempt {attempt} failed, retrying... Error: {e}")
+                await asyncio.sleep(self.retry_delay * attempt)  # Exponential backoff
 
-    async def _run_async(self, func, *args, **kwargs):
+    async def _run_in_executor(self, func, args):
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, lambda: func(*args, **kwargs))
+        return await loop.run_in_executor(None, func, *args)
 
-    def _get_ydl_options(self, quality: str, progress_callback: Optional[Callable]):
+    def _get_options(self, quality, progress_callback):
         opts = {
-            'format': self._get_format_string(quality),
+            'format': self._get_format(quality),
             'quiet': True,
             'no_warnings': True,
             'progress_hooks': [progress_callback] if progress_callback else [],
-            'merge_output_format': 'mp4',
-            'retries': self.max_retries,
-            'fragment_retries': self.max_retries,
+            'retries': 10,
+            'fragment_retries': 10,
             'skip_unavailable_fragments': True,
-            'extract_flat': False,
+            'extractor_args': {'youtube': {'skip': ['dash', 'hls']}},
+            'socket_timeout': 30,
+            'noprogress': True,
+            'outtmpl': os.path.join(self.download_path, '%(title)s.%(ext)s'),
         }
-        
+
         if quality == 'audio':
             opts.update({
                 'format': 'bestaudio/best',
                 'postprocessors': [{
                     'key': 'FFmpegExtractAudio',
                     'preferredcodec': 'mp3',
-                    'preferredquality': '192',
                 }],
             })
         else:
@@ -89,13 +74,13 @@ class YouTubePlaylistDownloader:
                 'key': 'FFmpegVideoConvertor',
                 'preferedformat': 'mp4',
             }]
-        
+
         return opts
 
-    def _get_format_string(self, quality: str) -> str:
+    def _get_format(self, quality):
         if quality == 'best':
-            return 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
+            return 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]'
         elif quality == 'audio':
-            return 'bestaudio/best'
+            return 'bestaudio'
         else:
-            return f'bestvideo[height<={quality}][ext=mp4]+bestaudio[ext=m4a]/best[height<={quality}]/best'
+            return f'bestvideo[height<={quality}]+bestaudio/best[height<={quality}]'
